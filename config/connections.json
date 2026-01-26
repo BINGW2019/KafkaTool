@@ -1,0 +1,15 @@
+[
+  {
+    "name": "127.0.0.1",
+    "bootstrap_servers": "127.0.0.1:9092",
+    "security_protocol": "PLAINTEXT",
+    "sasl_mechanism": null,
+    "sasl_username": null,
+    "sasl_password": null,
+    "ssl_cafile": null,
+    "ssl_certfile": null,
+    "ssl_keyfile": null,
+    "sasl_kerberos_service_name": null,
+    "sasl_kerberos_domain_name": null
+  }
+]
