@@ -521,23 +521,14 @@ class MessageDetailDialog(QDialog):
         # 设置表格高度，允许滚动
         self.consumption_table.setMinimumHeight(150)
         self.consumption_table.setMaximumHeight(300)
-        # 确保表格使用暗色背景
+        # 确保表格使用主题背景
         self.consumption_table.setAlternatingRowColors(False)
         # 启用垂直滚动条
         self.consumption_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # 只设置必要的样式，让表格继承全局主题样式
         self.consumption_table.setStyleSheet("""
-            QTableWidget {
-                background-color: #1a1b2e;
-                alternate-background-color: #1a1b2e;
-            }
             QTableWidget::item {
-                background-color: #1a1b2e;
-                color: #e1e4eb;
                 padding: 10px 12px;
-            }
-            QTableWidget::item:selected {
-                background-color: #3d5afe;
-                color: #ffffff;
             }
             QHeaderView::section {
                 padding: 10px 10px;
