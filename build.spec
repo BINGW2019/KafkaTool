@@ -25,7 +25,10 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        ('resources/up_arrow.png', 'resources'),
+        ('resources/down_arrow.png', 'resources'),
+    ],
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},

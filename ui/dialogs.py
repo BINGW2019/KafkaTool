@@ -1,13 +1,14 @@
 """对话框组件"""
 
 from datetime import datetime
+from typing import Optional
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLineEdit, QComboBox, QPushButton, QLabel, QSpinBox,
     QTextEdit, QGroupBox, QMessageBox, QCheckBox,
     QDialogButtonBox, QTabWidget, QWidget, QFileDialog,
-    QTableWidget, QTableWidgetItem, QHeaderView
+    QRadioButton, QListWidget, QAbstractItemView,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -360,6 +361,280 @@ class CreateTopicDialog(QDialog):
         }
 
 
+class AddPartitionsDialog(QDialog):
+    """增加分区对话框"""
+
+    def __init__(self, parent=None, topic_name: str = "", current_partition_count: int = 1):
+        super().__init__(parent)
+        self.topic_name = topic_name
+        self.current_count = current_partition_count
+        self.setup_ui()
+
+    def setup_ui(self):
+        self.setWindowTitle("增加分区")
+        self.setMinimumWidth(400)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(16)
+        layout.setContentsMargins(24, 24, 24, 24)
+
+        title = QLabel("增加 Topic 分区数")
+        title.setProperty("heading", True)
+        layout.addWidget(title)
+
+        form = QFormLayout()
+        form.setSpacing(12)
+
+        self.topic_label = QLabel(self.topic_name)
+        form.addRow("Topic:", self.topic_label)
+
+        self.current_label = QLabel(str(self.current_count))
+        form.addRow("当前分区数:", self.current_label)
+
+        self.new_partitions_spin = QSpinBox()
+        self.new_partitions_spin.setRange(self.current_count + 1, 1000)
+        self.new_partitions_spin.setValue(min(self.current_count + 1, 1000))
+        form.addRow("新分区总数:", self.new_partitions_spin)
+
+        layout.addLayout(form)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setProperty("secondary", True)
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+        ok_btn = QPushButton("确定")
+        ok_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(ok_btn)
+        layout.addLayout(btn_layout)
+
+    def get_new_total_partitions(self) -> int:
+        return self.new_partitions_spin.value()
+
+
+class ResetOffsetDialog(QDialog):
+    """重置消费点对话框"""
+
+    def __init__(self, parent=None, group_id: str = "", has_selection: bool = False, partition_count: int = 0):
+        super().__init__(parent)
+        self.group_id = group_id
+        self.has_selection = has_selection
+        self.partition_count = partition_count
+        self.setup_ui()
+
+    def setup_ui(self):
+        self.setWindowTitle("重置消费点")
+        self.setMinimumWidth(420)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(16)
+        layout.setContentsMargins(24, 24, 24, 24)
+
+        title = QLabel("重置消费者组消费点")
+        title.setProperty("heading", True)
+        layout.addWidget(title)
+
+        form = QFormLayout()
+        form.setSpacing(12)
+        self.group_label = QLabel(self.group_id)
+        form.addRow("消费者组:", self.group_label)
+        layout.addLayout(form)
+
+        target_group = QGroupBox("重置到")
+        target_layout = QVBoxLayout(target_group)
+        self.target_earliest = QRadioButton("最早 (earliest) — 从分区起始位置开始消费")
+        self.target_latest = QRadioButton("最新 (latest) — 从分区末尾开始消费，跳过已有消息")
+        self.target_earliest.setChecked(True)
+        target_layout.addWidget(self.target_earliest)
+        target_layout.addWidget(self.target_latest)
+        layout.addWidget(target_group)
+
+        scope_group = QGroupBox("范围")
+        scope_layout = QVBoxLayout(scope_group)
+        self.scope_all = QRadioButton(f"全部分区 ({self.partition_count} 个)")
+        self.scope_selected = QRadioButton("仅当前选中的行")
+        self.scope_all.setChecked(True)
+        self.scope_selected.setEnabled(self.has_selection)
+        if not self.has_selection:
+            self.scope_selected.setToolTip("请在下方 Offset 表格中选中要重置的分区")
+        scope_layout.addWidget(self.scope_all)
+        scope_layout.addWidget(self.scope_selected)
+        layout.addWidget(scope_group)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setProperty("secondary", True)
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+        ok_btn = QPushButton("确定")
+        ok_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(ok_btn)
+        layout.addLayout(btn_layout)
+
+    def get_target(self) -> str:
+        return "earliest" if self.target_earliest.isChecked() else "latest"
+
+    def get_scope(self) -> str:
+        return "selected" if self.scope_selected.isChecked() else "all"
+
+
+class CreateConsumerGroupDialog(QDialog):
+    """创建消费者组对话框"""
+
+    def __init__(self, parent=None, topic_names: list = None):
+        super().__init__(parent)
+        self.topic_names = topic_names or []
+        self.setup_ui()
+
+    def setup_ui(self):
+        self.setWindowTitle("创建消费者组")
+        self.setMinimumSize(440, 420)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(16)
+        layout.setContentsMargins(24, 24, 24, 24)
+
+        title = QLabel("创建新消费者组")
+        title.setProperty("heading", True)
+        layout.addWidget(title)
+
+        form = QFormLayout()
+        form.setSpacing(12)
+        self.group_id_edit = QLineEdit()
+        self.group_id_edit.setPlaceholderText("输入消费者组 ID，如 my-consumer-group")
+        form.addRow("消费者组 ID:", self.group_id_edit)
+        layout.addLayout(form)
+
+        topics_label = QLabel("订阅的 Topic（可多选）:")
+        layout.addWidget(topics_label)
+        self.topics_list = QListWidget()
+        self.topics_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
+        self.topics_list.setMinimumHeight(160)
+        for name in sorted(self.topic_names):
+            self.topics_list.addItem(name)
+        layout.addWidget(self.topics_list)
+
+        target_group = QGroupBox("初始消费点")
+        target_layout = QVBoxLayout(target_group)
+        self.target_earliest = QRadioButton("最早 (earliest) — 从分区起始位置开始消费")
+        self.target_latest = QRadioButton("最新 (latest) — 从分区末尾开始，跳过已有消息")
+        self.target_latest.setChecked(True)
+        target_layout.addWidget(self.target_earliest)
+        target_layout.addWidget(self.target_latest)
+        layout.addWidget(target_group)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setProperty("secondary", True)
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+        create_btn = QPushButton("创建")
+        create_btn.clicked.connect(self._on_create)
+        btn_layout.addWidget(create_btn)
+        layout.addLayout(btn_layout)
+
+    def _on_create(self):
+        if not self.group_id_edit.text().strip():
+            QMessageBox.warning(self, "警告", "请输入消费者组 ID")
+            return
+        selected = self.get_selected_topics()
+        if not selected:
+            QMessageBox.warning(self, "警告", "请至少选择一个 Topic")
+            return
+        self.accept()
+
+    def get_group_id(self) -> str:
+        return self.group_id_edit.text().strip()
+
+    def get_selected_topics(self) -> list:
+        return [item.text() for item in self.topics_list.selectedItems()]
+
+    def get_target(self) -> str:
+        return "earliest" if self.target_earliest.isChecked() else "latest"
+
+
+class ConsumeMessagesDialog(QDialog):
+    """消费消息对话框（选择 Topic、分区、消费者组后打开消息浏览器并拉取）"""
+
+    def __init__(self, parent=None, topic_names: list = None, group_names: list = None):
+        super().__init__(parent)
+        self.topic_names = topic_names or []
+        self.group_names = group_names or []
+        self.setup_ui()
+
+    def setup_ui(self):
+        self.setWindowTitle("消费消息")
+        self.setMinimumWidth(420)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(16)
+        layout.setContentsMargins(24, 24, 24, 24)
+
+        title = QLabel("消费消息")
+        title.setProperty("heading", True)
+        layout.addWidget(title)
+
+        form = QFormLayout()
+        form.setSpacing(12)
+
+        self.topic_combo = QComboBox()
+        self.topic_combo.setEditable(True)
+        self.topic_combo.setPlaceholderText("选择或输入 Topic 名称")
+        for name in sorted(self.topic_names):
+            self.topic_combo.addItem(name)
+        form.addRow("Topic:", self.topic_combo)
+
+        self.partition_spin = QSpinBox()
+        self.partition_spin.setRange(-1, 1000)
+        self.partition_spin.setValue(-1)
+        self.partition_spin.setSpecialValueText("全部")
+        form.addRow("分区:", self.partition_spin)
+
+        self.group_combo = QComboBox()
+        self.group_combo.addItem("无(匿名)")
+        for gid in sorted(self.group_names):
+            self.group_combo.addItem(gid)
+        form.addRow("消费者组:", self.group_combo)
+        layout.addLayout(form)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setProperty("secondary", True)
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+        ok_btn = QPushButton("确定")
+        ok_btn.clicked.connect(self._on_ok)
+        btn_layout.addWidget(ok_btn)
+        layout.addLayout(btn_layout)
+
+    def _on_ok(self):
+        topic = self.get_topic()
+        if not topic:
+            QMessageBox.warning(self, "警告", "请选择或输入 Topic 名称")
+            return
+        self.accept()
+
+    def get_topic(self) -> str:
+        return self.topic_combo.currentText().strip()
+
+    def get_partition(self) -> int:
+        return self.partition_spin.value()
+
+    def get_group_id(self) -> Optional[str]:
+        text = self.group_combo.currentText().strip()
+        if not text or text == "无(匿名)":
+            return None
+        return text
+
+
 class MessageProducerDialog(QDialog):
     """消息发送对话框"""
     
@@ -500,50 +775,13 @@ class MessageDetailDialog(QDialog):
         self.timestamp_label = QLabel()
         meta_layout.addRow("时间戳:", self.timestamp_label)
         
+        # 消费状态（合并到元数据）
+        self.consumption_status_label = QLabel("检查中...")
+        self.consumption_status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.consumption_status_label.setWordWrap(True)
+        meta_layout.addRow("消费状态:", self.consumption_status_label)
+        
         layout.addWidget(meta_group)
-        
-        # 消费信息表格
-        consumption_group = QGroupBox("消费信息")
-        consumption_layout = QVBoxLayout(consumption_group)
-        consumption_layout.setContentsMargins(8, 16, 8, 8)
-        
-        self.consumption_table = QTableWidget()
-        self.consumption_table.setColumnCount(3)
-        self.consumption_table.setHorizontalHeaderLabels(["消费组", "消费情况", "消费时间"])
-        # 消费组列：使用 Stretch 模式占据剩余空间
-        self.consumption_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        # 消费情况列：设置合理宽度
-        self.consumption_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        self.consumption_table.setColumnWidth(1, 120)
-        # 消费时间列：设置合理宽度
-        self.consumption_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        self.consumption_table.setColumnWidth(2, 180)
-        # 设置表格高度，允许滚动
-        self.consumption_table.setMinimumHeight(150)
-        self.consumption_table.setMaximumHeight(300)
-        # 确保表格使用主题背景
-        self.consumption_table.setAlternatingRowColors(False)
-        # 启用垂直滚动条
-        self.consumption_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        # 只设置必要的样式，让表格继承全局主题样式
-        self.consumption_table.setStyleSheet("""
-            QTableWidget::item {
-                padding: 10px 12px;
-            }
-            QHeaderView::section {
-                padding: 10px 10px;
-                min-height: 40px;
-            }
-        """)
-        self.consumption_table.setRowCount(1)
-        self.consumption_table.setItem(0, 0, QTableWidgetItem("检查中..."))
-        self.consumption_table.setItem(0, 1, QTableWidgetItem(""))
-        self.consumption_table.setItem(0, 2, QTableWidgetItem(""))
-        # 设置行高
-        self.consumption_table.setRowHeight(0, 40)
-        consumption_layout.addWidget(self.consumption_table)
-        
-        layout.addWidget(consumption_group)
         
         # 标签页
         tab_widget = QTabWidget()
@@ -641,27 +879,14 @@ class MessageDetailDialog(QDialog):
             )
     
     def update_consumption_status(self, consumed_by):
-        """更新消费状态显示"""
-        self.consumption_table.setRowCount(0)
-        
+        """更新消费状态显示（已合并到元数据）"""
         if not consumed_by:
-            self.consumption_table.setRowCount(1)
-            self.consumption_table.setItem(0, 0, QTableWidgetItem("-"))
-            status_item = QTableWidgetItem("未消费")
-            status_item.setForeground(Qt.GlobalColor.red)
-            self.consumption_table.setItem(0, 1, status_item)
-            self.consumption_table.setItem(0, 2, QTableWidgetItem("-"))
-            # 设置行高
-            self.consumption_table.setRowHeight(0, 40)
+            self.consumption_status_label.setText("未消费")
+            self.consumption_status_label.setStyleSheet("color: #f44336;")  # 红色
         else:
-            self.consumption_table.setRowCount(len(consumed_by))
-            for i, group in enumerate(consumed_by):
-                self.consumption_table.setItem(i, 0, QTableWidgetItem(group['group_id']))
-                status_item = QTableWidgetItem("已消费")
-                status_item.setForeground(Qt.GlobalColor.green)
-                self.consumption_table.setItem(i, 1, status_item)
-                
-                # 显示消费时间
+            # 已消费：显示消费者和消费时间
+            lines = []
+            for group in consumed_by:
                 consumption_time = group.get('consumption_time')
                 if consumption_time:
                     if isinstance(consumption_time, datetime):
@@ -670,9 +895,9 @@ class MessageDetailDialog(QDialog):
                         time_str = str(consumption_time)
                 else:
                     time_str = "-"
-                self.consumption_table.setItem(i, 2, QTableWidgetItem(time_str))
-                # 设置行高
-                self.consumption_table.setRowHeight(i, 40)
+                lines.append(f"{group['group_id']} · {time_str}")
+            self.consumption_status_label.setText("\n".join(lines))
+            self.consumption_status_label.setStyleSheet("color: #4caf50;")  # 绿色
     
     def copy_value(self):
         """复制 Value 到剪贴板"""

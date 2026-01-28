@@ -17,6 +17,14 @@ def get_app_dir() -> Path:
         # 直接运行 Python 脚本
         return Path(__file__).parent.parent
 
+
+def get_resources_dir() -> Path:
+    """获取 resources 目录（样式表图片等），兼容打包单文件/目录模式"""
+    if getattr(sys, 'frozen', False):
+        base = Path(getattr(sys, '_MEIPASS', str(Path(sys.executable).parent)))
+        return (base / "resources").resolve()
+    return (Path(__file__).parent.parent / "resources").resolve()
+
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSplitter, QTreeWidget, QTreeWidgetItem, QStackedWidget,
@@ -29,7 +37,11 @@ from PyQt6.QtGui import QAction, QIcon, QFont
 from kafka_client import KafkaClusterClient, ClusterConnection
 from kafka_client.models import TopicInfo, ConsumerGroupInfo, KafkaMessage
 
-from .dialogs import ConnectionDialog, CreateTopicDialog, MessageProducerDialog
+from .dialogs import (
+    ConnectionDialog, CreateTopicDialog, AddPartitionsDialog,
+    ResetOffsetDialog, CreateConsumerGroupDialog, ConsumeMessagesDialog,
+    MessageProducerDialog,
+)
 from .panels import (
     TopicDetailPanel, ConsumerGroupPanel, MessageBrowserPanel,
     WelcomePanel, LoadingOverlay
@@ -168,11 +180,13 @@ class MainWindow(QMainWindow):
         self.topic_panel.refresh_btn.clicked.connect(self.refresh_current_topic)
         self.topic_panel.message_browse_requested.connect(self.browse_topic_messages)
         self.topic_panel.send_message_requested.connect(self.show_producer_dialog)
+        self.topic_panel.add_partitions_requested.connect(self.on_add_partitions_from_panel)
         self.content_stack.addWidget(self.topic_panel)
         
         # Consumer Group面板
         self.consumer_panel = ConsumerGroupPanel()
         self.consumer_panel.refresh_btn.clicked.connect(self.refresh_current_group)
+        self.consumer_panel.reset_offsets_requested.connect(self.on_reset_offsets_requested)
         self.content_stack.addWidget(self.consumer_panel)
         
         # 消息浏览器面板
@@ -246,6 +260,10 @@ class MainWindow(QMainWindow):
         
         # 工具菜单
         tools_menu = menubar.addMenu("工具(&T)")
+        
+        consume_action = QAction("消费消息(&C)", self)
+        consume_action.triggered.connect(self.show_consume_messages_dialog)
+        tools_menu.addAction(consume_action)
         
         producer_action = QAction("发送消息(&S)", self)
         producer_action.setShortcut("Ctrl+P")
@@ -495,6 +513,7 @@ class MainWindow(QMainWindow):
             })
         
         cluster_item.setExpanded(True)
+        topics_item.setExpanded(True)  # 展开 Topics，便于看到 Topic 列表（如增加分区后）
     
     def on_data_load_error(self, error: str):
         """数据加载失败"""
@@ -552,6 +571,11 @@ class MainWindow(QMainWindow):
             send_action = menu.addAction("发送消息")
             send_action.triggered.connect(lambda: self.show_producer_dialog(data["topic"]))
             
+            add_partitions_action = menu.addAction("增加分区")
+            add_partitions_action.triggered.connect(
+                lambda: self.add_partitions(data["connection"], data["topic"], current_count=None)
+            )
+            
             menu.addSeparator()
             
             copy_action = menu.addAction("复制 Topic 名称")
@@ -563,6 +587,9 @@ class MainWindow(QMainWindow):
             delete_action.triggered.connect(lambda: self.delete_topic(data["connection"], data["topic"]))
         
         elif data["type"] == "groups_folder":
+            create_action = menu.addAction("创建消费者组")
+            create_action.triggered.connect(lambda: self.create_consumer_group(data["connection"]))
+            menu.addSeparator()
             refresh_action = menu.addAction("刷新")
             refresh_action.triggered.connect(lambda: self.refresh_groups(data["connection"]))
         
@@ -658,7 +685,58 @@ class MainWindow(QMainWindow):
         if group:
             self.consumer_panel.load_group(group)
             self.content_stack.setCurrentWidget(self.consumer_panel)
-    
+
+    def on_reset_offsets_requested(self):
+        """重置消费点：弹窗选择目标与范围，然后调用客户端重置并刷新组详情"""
+        if not self.current_connection_name or not self.current_client:
+            QMessageBox.warning(self, "警告", "请先连接到 Kafka 集群")
+            return
+        group = self.consumer_panel.current_group
+        if not group:
+            QMessageBox.warning(self, "警告", "请先选择要操作的消费者组")
+            return
+        selected = self.consumer_panel.get_selected_offset_partitions()
+        dialog = ResetOffsetDialog(
+            self,
+            group_id=group.group_id,
+            has_selection=bool(selected),
+            partition_count=len(group.offsets),
+        )
+        if not dialog.exec():
+            return
+        target = dialog.get_target()
+        scope = dialog.get_scope()
+        if scope == "all":
+            topic_partitions = [(o.topic, o.partition) for o in group.offsets]
+        else:
+            topic_partitions = selected
+            if not topic_partitions:
+                QMessageBox.warning(self, "警告", "请先在 Offset 表格中选中要重置的分区")
+                return
+        self.loading_overlay.show_loading("正在重置消费点...")
+
+        def do_reset():
+            self.current_client.reset_consumer_group_offsets(group.group_id, topic_partitions, target)
+
+        def on_finished(_):
+            if self.worker in self.active_threads:
+                self.active_threads.remove(self.worker)
+            self.loading_overlay.hide_loading()
+            QMessageBox.information(self, "成功", f"已将该组 {len(topic_partitions)} 个分区重置到「{target}」")
+            self.show_consumer_group_detail(self.current_connection_name, group.group_id)
+
+        def on_error(e):
+            if self.worker in self.active_threads:
+                self.active_threads.remove(self.worker)
+            self.loading_overlay.hide_loading()
+            QMessageBox.critical(self, "错误", f"重置消费点失败:\n{e}")
+
+        self.worker = WorkerThread(do_reset)
+        self.worker.finished.connect(on_finished)
+        self.worker.error.connect(on_error)
+        self.active_threads.append(self.worker)
+        self.worker.start()
+
     def on_load_error(self, type_name: str, error: str):
         """加载错误处理"""
         self.loading_overlay.hide_loading()
@@ -672,9 +750,49 @@ class MainWindow(QMainWindow):
         # 自动获取消息
         if self.current_client:
             self.fetch_messages(topic, partition, -1, 100)
-    
-    def fetch_messages(self, topic: str, partition: int, offset: int, limit: int, from_beginning: bool = False, sort_field: str = "offset"):
-        """获取消息"""
+
+    def show_consume_messages_dialog(self):
+        """消费消息：拉取 Topic/消费者组列表后弹窗，确定后打开消息浏览器并拉取。"""
+        if not self.current_client or not self.current_connection_name:
+            QMessageBox.warning(self, "警告", "请先连接到 Kafka 集群")
+            return
+        client = self.current_client
+        self.loading_overlay.show_loading("正在加载 Topic 与消费者组列表...")
+
+        def load_data():
+            topics = client.get_topic_names()
+            groups = client.get_consumer_group_names()
+            return topics, [g[0] for g in groups]
+
+        def on_loaded(result):
+            if self.worker in self.active_threads:
+                self.active_threads.remove(self.worker)
+            self.loading_overlay.hide_loading()
+            topic_names, group_names = result
+            dialog = ConsumeMessagesDialog(self, topic_names=topic_names, group_names=group_names)
+            if not dialog.exec():
+                return
+            topic = dialog.get_topic()
+            partition = dialog.get_partition()
+            group_id = dialog.get_group_id()
+            self.message_panel.set_topic(topic, partition)
+            self.content_stack.setCurrentWidget(self.message_panel)
+            self.fetch_messages(topic, partition, -1, 100, from_beginning=False, sort_field="offset", group_id=group_id)
+
+        def on_error(e):
+            if self.worker in self.active_threads:
+                self.active_threads.remove(self.worker)
+            self.loading_overlay.hide_loading()
+            QMessageBox.warning(self, "错误", f"加载列表失败:\n{e}")
+
+        self.worker = WorkerThread(load_data)
+        self.worker.finished.connect(on_loaded)
+        self.worker.error.connect(on_error)
+        self.active_threads.append(self.worker)
+        self.worker.start()
+
+    def fetch_messages(self, topic: str, partition: int, offset: int, limit: int, from_beginning: bool = False, sort_field: str = "offset", group_id: Optional[str] = None):
+        """获取消息。group_id 不为空时从该消费者组的提交位点开始拉取。"""
         if not self.current_client:
             QMessageBox.warning(self, "警告", "请先连接到Kafka集群")
             return
@@ -696,7 +814,7 @@ class MainWindow(QMainWindow):
         
         self.worker = WorkerThread(
             self.current_client.consume_messages,
-            topic, part, off, limit, from_beginning=from_beginning, sort_field=sort_field
+            topic, part, off, limit, from_beginning=from_beginning, sort_field=sort_field, group_id=group_id
         )
         self.worker.finished.connect(on_finished)
         self.worker.error.connect(on_error)
@@ -733,8 +851,13 @@ class MainWindow(QMainWindow):
                     key=key,
                     partition=data['partition']
                 )
-                
                 QMessageBox.information(self, "成功", "消息发送成功！")
+                # 若当前正在查看该 Topic 详情，重新加载以更新消息总数和分区信息
+                sent_topic = data['topic']
+                if (self.current_connection_name
+                        and self.topic_panel.current_topic
+                        and self.topic_panel.current_topic.name == sent_topic):
+                    self.show_topic_detail(self.current_connection_name, sent_topic)
             except Exception as e:
                 QMessageBox.critical(self, "错误", f"消息发送失败:\n{str(e)}")
     
@@ -754,6 +877,11 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "成功", f"消息已重新发送到 {topic}")
             # 刷新消息列表
             self.message_panel.on_fetch_clicked()
+            # 若当前正在查看该 Topic 详情，重新加载以更新消息总数
+            if (self.current_connection_name
+                    and self.topic_panel.current_topic
+                    and self.topic_panel.current_topic.name == topic):
+                self.show_topic_detail(self.current_connection_name, topic)
         except Exception as e:
             QMessageBox.critical(self, "错误", f"消息发送失败:\n{str(e)}")
     
@@ -784,6 +912,79 @@ class MainWindow(QMainWindow):
         # 保持引用防止被回收
         self._consumption_check_worker = worker
     
+    def on_add_partitions_from_panel(self, topic_name: str, current_count: int):
+        """从 Topic 详情面板发起增加分区"""
+        if not self.current_connection_name:
+            QMessageBox.warning(self, "警告", "请先连接到集群")
+            return
+        self.add_partitions(self.current_connection_name, topic_name, current_count=current_count)
+    
+    def add_partitions(self, connection: str, topic_name: str, current_count: Optional[int] = None):
+        """增加 Topic 分区数。current_count 为 None 时先异步加载 Topic 详情再弹窗。"""
+        if connection not in self.clients:
+            QMessageBox.warning(self, "警告", "请先连接到集群")
+            return
+        
+        def do_show_dialog_and_apply(topic_info: Optional[TopicInfo]):
+            self.loading_overlay.hide_loading()
+            if self.worker in self.active_threads:
+                self.active_threads.remove(self.worker)
+            if not topic_info:
+                QMessageBox.warning(self, "错误", "无法获取 Topic 信息")
+                return
+            cnt = topic_info.partition_count
+            dialog = AddPartitionsDialog(self, topic_info.name, cnt)
+            if not dialog.exec():
+                return
+            new_total = dialog.get_new_total_partitions()
+            try:
+                self.clients[connection].create_partitions(topic_info.name, new_total)
+                QMessageBox.information(
+                    self, "成功",
+                    f"Topic '{topic_info.name}' 分区数已从 {cnt} 调整为 {new_total}。"
+                )
+                self.refresh_topics(connection)
+                if (self.current_connection_name == connection
+                        and self.topic_panel.current_topic
+                        and self.topic_panel.current_topic.name == topic_info.name):
+                    self.show_topic_detail(connection, topic_info.name)
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"增加分区失败:\n{str(e)}")
+        
+        if current_count is not None:
+            dialog = AddPartitionsDialog(self, topic_name, current_count)
+            if not dialog.exec():
+                return
+            new_total = dialog.get_new_total_partitions()
+            try:
+                self.clients[connection].create_partitions(topic_name, new_total)
+                QMessageBox.information(
+                    self, "成功",
+                    f"Topic '{topic_name}' 分区数已从 {current_count} 调整为 {new_total}。"
+                )
+                self.refresh_topics(connection)
+                if (self.current_connection_name == connection
+                        and self.topic_panel.current_topic
+                        and self.topic_panel.current_topic.name == topic_name):
+                    self.show_topic_detail(connection, topic_name)
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"增加分区失败:\n{str(e)}")
+            return
+        
+        self.loading_overlay.show_loading("正在获取 Topic 信息...")
+        
+        def on_error(e):
+            if self.worker in self.active_threads:
+                self.active_threads.remove(self.worker)
+            self.loading_overlay.hide_loading()
+            QMessageBox.warning(self, "错误", f"无法获取 Topic 信息:\n{e}")
+        
+        self.worker = WorkerThread(self.clients[connection].get_topic_detail, topic_name)
+        self.worker.finished.connect(do_show_dialog_and_apply)
+        self.worker.error.connect(on_error)
+        self.active_threads.append(self.worker)
+        self.worker.start()
+    
     def create_topic(self, connection: str):
         """创建Topic"""
         if connection not in self.clients:
@@ -804,7 +1005,64 @@ class MainWindow(QMainWindow):
                 self.refresh_topics(connection)
             except Exception as e:
                 QMessageBox.critical(self, "错误", f"Topic创建失败:\n{str(e)}")
-    
+
+    def create_consumer_group(self, connection: str):
+        """创建消费者组：先拉取 Topic 列表，弹窗填写组 ID 与订阅 Topic，再调用客户端创建并刷新列表。"""
+        if connection not in self.clients:
+            QMessageBox.warning(self, "警告", "请先连接到集群")
+            return
+        client = self.clients[connection]
+        self.loading_overlay.show_loading("正在获取 Topic 列表...")
+
+        def on_topic_names_loaded(topic_names):
+            if self.worker in self.active_threads:
+                self.active_threads.remove(self.worker)
+            self.loading_overlay.hide_loading()
+            dialog = CreateConsumerGroupDialog(self, topic_names=topic_names)
+            if not dialog.exec():
+                return
+            group_id = dialog.get_group_id()
+            topics = dialog.get_selected_topics()
+            target = dialog.get_target()
+            self.loading_overlay.show_loading("正在创建消费者组...")
+
+            def do_create():
+                client.create_consumer_group(group_id, topics, target)
+
+            def on_created(_):
+                if self.worker in self.active_threads:
+                    self.active_threads.remove(self.worker)
+                self.loading_overlay.hide_loading()
+                QMessageBox.information(
+                    self, "成功",
+                    f"消费者组「{group_id}」已创建，已订阅 {len(topics)} 个 Topic，初始消费点: {target}。"
+                )
+                self.refresh_groups(connection)
+
+            def on_create_error(e):
+                if self.worker in self.active_threads:
+                    self.active_threads.remove(self.worker)
+                self.loading_overlay.hide_loading()
+                QMessageBox.critical(self, "错误", f"创建消费者组失败:\n{e}")
+
+            self.worker = WorkerThread(do_create)
+            self.worker.finished.connect(on_created)
+            self.worker.error.connect(on_create_error)
+            self.active_threads.append(self.worker)
+            self.worker.start()
+
+        def on_error(e):
+            if self.worker in self.active_threads:
+                self.active_threads.remove(self.worker)
+            self.loading_overlay.hide_loading()
+            QMessageBox.warning(self, "错误", f"获取 Topic 列表失败:\n{e}")
+
+        self.worker = WorkerThread(client.get_topic_names)
+        self.worker.finished.connect(on_topic_names_loaded)
+        self.worker.error.connect(on_error)
+        self.active_threads.append(self.worker)
+        self.worker.start()
+
     def copy_topic_name(self, topic_name: str):
         """复制Topic名称到剪贴板"""
         clipboard = QApplication.clipboard()
@@ -955,7 +1213,12 @@ class MainWindow(QMainWindow):
     def apply_theme(self, theme_name: str):
         """应用主题"""
         if theme_name in THEMES:
-            self.setStyleSheet(THEMES[theme_name])
+            sheet = THEMES[theme_name]
+            # 注入 QSpinBox 箭头图片路径（Qt 样式表 url 需使用正斜杠）
+            res_dir = get_resources_dir()
+            path_str = str(res_dir).replace("\\", "/")
+            sheet = sheet.replace("{{RESOURCES_DIR}}", path_str)
+            self.setStyleSheet(sheet)
             self.current_theme = theme_name
             # 更新加载遮罩层的主题
             if hasattr(self, 'loading_overlay'):

@@ -1,13 +1,14 @@
 """Kafka客户端封装"""
 
 import logging
-from typing import List, Optional, Dict, Any, Callable
+from typing import List, Optional, Dict, Any, Callable, Tuple
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import threading
 
 from kafka import KafkaConsumer, KafkaProducer, KafkaAdminClient
 from kafka.admin import NewTopic, ConfigResource, ConfigResourceType
+from kafka.admin.new_partitions import NewPartitions
 from kafka.errors import KafkaError
 from kafka.structs import TopicPartition
 
@@ -343,62 +344,41 @@ class KafkaClusterClient:
         limit: int = 100,
         timeout_ms: int = 5000,
         from_beginning: bool = False,
-        sort_field: str = "offset"
+        sort_field: str = "offset",
+        group_id: Optional[str] = None,
     ) -> List[KafkaMessage]:
-        """消费消息
-        
-        Args:
-            topic: Topic名称
-            partition: 分区号，None表示所有分区
-            offset: 起始offset，None表示自动
-            limit: 消息数量限制
-            timeout_ms: 超时时间
-            from_beginning: True从最旧开始，False从最新开始
-            sort_field: 排序字段，"offset" 或 "timestamp"
-        """
+        """消费消息。group_id 不为空时使用该消费者组的提交位点作为起始位置（不 seek）。"""
         messages = []
-        consumer = self._get_consumer()
+        consumer = self._get_consumer(group_id=group_id)
         
         try:
             if partition is not None:
-                # 指定分区
                 tp = TopicPartition(topic, partition)
                 consumer.assign([tp])
-                
-                if offset is not None:
-                    consumer.seek(tp, offset)
-                elif from_beginning:
-                    # 从最旧开始
-                    beginning_offsets = consumer.beginning_offsets([tp])
-                    start_offset = beginning_offsets.get(tp, 0)
-                    consumer.seek(tp, start_offset)
-                else:
-                    # 从最新的往前取
-                    end_offsets = consumer.end_offsets([tp])
-                    end_offset = end_offsets.get(tp, 0)
-                    start_offset = max(0, end_offset - limit)
-                    consumer.seek(tp, start_offset)
-            else:
-                # 订阅整个Topic
-                consumer.subscribe([topic])
-                # 触发分区分配
-                consumer.poll(timeout_ms=1000)
-                
-                assigned = consumer.assignment()
-                for tp in assigned:
-                    if from_beginning:
-                        # 从最旧开始
+                if group_id is None:
+                    if offset is not None:
+                        consumer.seek(tp, offset)
+                    elif from_beginning:
                         beginning_offsets = consumer.beginning_offsets([tp])
-                        start_offset = beginning_offsets.get(tp, 0)
-                        consumer.seek(tp, start_offset)
+                        consumer.seek(tp, beginning_offsets.get(tp, 0))
                     else:
-                        # 从最新的往前取
                         end_offsets = consumer.end_offsets([tp])
                         end_offset = end_offsets.get(tp, 0)
-                        start_offset = max(0, end_offset - (limit // len(assigned)))
-                        consumer.seek(tp, start_offset)
+                        consumer.seek(tp, max(0, end_offset - limit))
+            else:
+                consumer.subscribe([topic])
+                consumer.poll(timeout_ms=1000)
+                assigned = consumer.assignment()
+                if group_id is None and assigned:
+                    for tp in assigned:
+                        if from_beginning:
+                            beginning_offsets = consumer.beginning_offsets([tp])
+                            consumer.seek(tp, beginning_offsets.get(tp, 0))
+                        else:
+                            end_offsets = consumer.end_offsets([tp])
+                            end_offset = end_offsets.get(tp, 0)
+                            consumer.seek(tp, max(0, end_offset - (limit // len(assigned))))
             
-            # 拉取消息
             raw_messages = consumer.poll(timeout_ms=timeout_ms, max_records=limit)
             
             for tp, msg_list in raw_messages.items():
@@ -543,4 +523,75 @@ class KafkaClusterClient:
         except Exception as e:
             logger.error(f"Topic删除失败: {e}")
             raise
+
+    def create_partitions(self, topic_name: str, new_total_count: int) -> bool:
+        """增加 Topic 分区数（指定新的分区总数，由 Broker 自动分配副本）"""
+        if not self._admin_client:
+            raise RuntimeError("未连接到Kafka集群")
+        try:
+            self._admin_client.create_partitions(
+                {topic_name: NewPartitions(total_count=new_total_count, new_assignments=None)}
+            )
+            logger.info(f"Topic '{topic_name}' 分区数已调整为 {new_total_count}")
+            return True
+        except Exception as e:
+            logger.error(f"增加分区失败: {e}")
+            raise
+
+    def reset_consumer_group_offsets(
+        self,
+        group_id: str,
+        topic_partitions: List[Tuple[str, int]],
+        target: str,
+    ) -> bool:
+        """重置消费者组在指定分区上的消费点。target: 'earliest' 或 'latest'。"""
+        if not topic_partitions:
+            raise ValueError("topic_partitions 不能为空")
+        if target not in ("earliest", "latest"):
+            raise ValueError("target 必须为 'earliest' 或 'latest'")
+        tps = [TopicPartition(topic, partition) for topic, partition in topic_partitions]
+        consumer = self._get_consumer(group_id=group_id)
+        try:
+            consumer.assign(tps)
+            if target == "earliest":
+                offsets = consumer.beginning_offsets(tps)
+            else:
+                offsets = consumer.end_offsets(tps)
+            for tp in tps:
+                consumer.seek(tp, offsets.get(tp, 0))
+            consumer.commit()
+            logger.info(f"消费者组 '{group_id}' 已重置 {len(tps)} 个分区到 {target}")
+            return True
+        finally:
+            consumer.close()
+
+    def create_consumer_group(
+        self,
+        group_id: str,
+        topic_names: List[str],
+        target: str = "latest",
+    ) -> bool:
+        """创建消费者组：用指定 group_id 订阅 topic，将消费点设为 earliest 或 latest 并提交，使组出现在集群中。"""
+        if not group_id or not topic_names:
+            raise ValueError("group_id 与 topic_names 不能为空")
+        if target not in ("earliest", "latest"):
+            raise ValueError("target 必须为 'earliest' 或 'latest'")
+        consumer = self._get_consumer(group_id=group_id)
+        try:
+            consumer.subscribe(topic_names)
+            consumer.poll(timeout_ms=5000)
+            assigned = consumer.assignment()
+            if not assigned:
+                raise RuntimeError("未分配到任何分区，请检查 Topic 是否存在")
+            if target == "earliest":
+                offsets = consumer.beginning_offsets(assigned)
+            else:
+                offsets = consumer.end_offsets(assigned)
+            for tp in assigned:
+                consumer.seek(tp, offsets.get(tp, 0))
+            consumer.commit()
+            logger.info(f"消费者组 '{group_id}' 已创建，订阅 {len(topic_names)} 个 Topic，初始消费点: {target}")
+            return True
+        finally:
+            consumer.close()
 

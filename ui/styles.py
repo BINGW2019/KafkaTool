@@ -593,8 +593,9 @@ QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
     background-color: #252847;
     border: none;
     border-radius: 4px;
-    width: 24px;
-    margin: 2px;
+    width: 20px;
+    min-height: 14px;
+    margin: 1px;
 }
 
 QSpinBox::up-button:hover, QSpinBox::down-button:hover,
@@ -602,16 +603,20 @@ QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
     background-color: #3d5afe;
 }
 
-QSpinBox::up-arrow {
-    border-left: 5px solid transparent;
-    border-right: 5px solid transparent;
-    border-bottom: 6px solid #e1e4eb;
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: url({{RESOURCES_DIR}}/up_arrow.png);
+    width: 12px;
+    height: 8px;
+    subcontrol-origin: padding;
+    subcontrol-position: top center;
 }
 
-QSpinBox::down-arrow {
-    border-left: 5px solid transparent;
-    border-right: 5px solid transparent;
-    border-top: 6px solid #e1e4eb;
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: url({{RESOURCES_DIR}}/down_arrow.png);
+    width: 12px;
+    height: 8px;
+    subcontrol-origin: padding;
+    subcontrol-position: bottom center;
 }
 
 /* ========== 进度条 ========== */
@@ -1269,13 +1274,30 @@ QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
     background-color: #f1f5f9;
     border: none;
     border-radius: 4px;
-    width: 24px;
-    margin: 2px;
+    width: 20px;
+    min-height: 12px;
+    margin: 1px;
 }
 
 QSpinBox::up-button:hover, QSpinBox::down-button:hover,
 QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
     background-color: #3d5afe;
+}
+
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: url({{RESOURCES_DIR}}/up_arrow.png);
+    width: 12px;
+    height: 8px;
+    subcontrol-origin: padding;
+    subcontrol-position: top center;
+}
+
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: url({{RESOURCES_DIR}}/down_arrow.png);
+    width: 12px;
+    height: 8px;
+    subcontrol-origin: padding;
+    subcontrol-position: bottom center;
 }
 
 /* 进度条 */

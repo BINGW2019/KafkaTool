@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
 from PyQt6.QtGui import QFont, QColor, QAction
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from kafka_client.models import (
     TopicInfo, PartitionInfo, ConsumerGroupInfo, KafkaMessage
 )
@@ -84,6 +84,7 @@ class TopicDetailPanel(QWidget):
     
     message_browse_requested = pyqtSignal(str, int)  # topic, partition
     send_message_requested = pyqtSignal(str)  # topic
+    add_partitions_requested = pyqtSignal(str, int)  # topic_name, current_partition_count
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -111,6 +112,10 @@ class TopicDetailPanel(QWidget):
         self.send_message_btn = QPushButton("✉️ 发送消息")
         self.send_message_btn.setProperty("secondary", True)
         header.addWidget(self.send_message_btn)
+        
+        self.add_partitions_btn = QPushButton("➕ 增加分区")
+        self.add_partitions_btn.setProperty("secondary", True)
+        header.addWidget(self.add_partitions_btn)
         
         self.refresh_btn = QPushButton("🔄 刷新")
         self.refresh_btn.setProperty("secondary", True)
@@ -170,6 +175,15 @@ class TopicDetailPanel(QWidget):
         
         # 连接发送消息按钮
         self.send_message_btn.clicked.connect(self.on_send_message_clicked)
+        self.add_partitions_btn.clicked.connect(self.on_add_partitions_clicked)
+    
+    def on_add_partitions_clicked(self):
+        """增加分区按钮点击"""
+        if self.current_topic:
+            self.add_partitions_requested.emit(
+                self.current_topic.name,
+                self.current_topic.partition_count
+            )
     
     def on_browse_messages_clicked(self):
         """查看消息按钮点击"""
@@ -204,13 +218,17 @@ class TopicDetailPanel(QWidget):
         self.messages_card.set_value(f"{topic.total_messages:,}")
         self.replication_card.set_value(str(topic.replication_factor))
         
-        # 更新分区表格
+        # 更新分区表格（副本/ISR 用显式文本避免 str([]) 在某些字体下显示为方框）
+        def _fmt_list(lst):
+            return ", ".join(map(str, lst)) if lst else "—"
+
         self.partitions_table.setRowCount(len(topic.partitions))
         for i, partition in enumerate(topic.partitions):
+            leader_text = "—" if partition.leader == -1 else str(partition.leader)
             self.partitions_table.setItem(i, 0, QTableWidgetItem(str(partition.partition_id)))
-            self.partitions_table.setItem(i, 1, QTableWidgetItem(str(partition.leader)))
-            self.partitions_table.setItem(i, 2, QTableWidgetItem(str(partition.replicas)))
-            self.partitions_table.setItem(i, 3, QTableWidgetItem(str(partition.isr)))
+            self.partitions_table.setItem(i, 1, QTableWidgetItem(leader_text))
+            self.partitions_table.setItem(i, 2, QTableWidgetItem(_fmt_list(partition.replicas)))
+            self.partitions_table.setItem(i, 3, QTableWidgetItem(_fmt_list(partition.isr)))
             self.partitions_table.setItem(i, 4, QTableWidgetItem(f"{partition.beginning_offset:,}"))
             self.partitions_table.setItem(i, 5, QTableWidgetItem(f"{partition.end_offset:,}"))
             # 设置行高
@@ -237,31 +255,38 @@ class TopicDetailPanel(QWidget):
 
 class ConsumerGroupPanel(QWidget):
     """消费者组面板"""
-    
+
+    reset_offsets_requested = pyqtSignal()  # 请求打开重置消费点（由 main_window 弹窗并执行）
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_group: Optional[ConsumerGroupInfo] = None
         self.all_offsets = []  # 保存所有offset用于过滤
         self.setup_ui()
-    
+
     def setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setSpacing(16)
         layout.setContentsMargins(0, 0, 0, 0)
-        
+
         # 标题栏
         header = QHBoxLayout()
-        
+
         self.title_label = QLabel("Consumer Group 详情")
         self.title_label.setObjectName("statsCardValue")
         header.addWidget(self.title_label)
-        
+
         header.addStretch()
-        
+
+        self.reset_offsets_btn = QPushButton("重置消费点")
+        self.reset_offsets_btn.setProperty("secondary", True)
+        self.reset_offsets_btn.clicked.connect(self._on_reset_offsets_clicked)
+        header.addWidget(self.reset_offsets_btn)
+
         self.refresh_btn = QPushButton("🔄 刷新")
         self.refresh_btn.setProperty("secondary", True)
         header.addWidget(self.refresh_btn)
-        
+
         layout.addLayout(header)
         
         # 统计卡片
@@ -375,6 +400,26 @@ class ConsumerGroupPanel(QWidget):
             # 设置行高
             self.members_table.setRowHeight(i, 40)
     
+    def _on_reset_offsets_clicked(self):
+        if self.current_group:
+            self.reset_offsets_requested.emit()
+
+    def get_selected_offset_partitions(self) -> List[Tuple[str, int]]:
+        """返回当前 Offset 表格中选中行对应的 (topic, partition) 列表（从表格单元格读取）。"""
+        rows = set(item.row() for item in self.offsets_table.selectedItems())
+        out = []
+        for row in rows:
+            topic_item = self.offsets_table.item(row, 0)
+            part_item = self.offsets_table.item(row, 1)
+            if topic_item is not None and part_item is not None:
+                try:
+                    topic = topic_item.text()
+                    partition = int(part_item.data(Qt.ItemDataRole.DisplayRole) or part_item.text())
+                    out.append((topic, partition))
+                except (TypeError, ValueError):
+                    pass
+        return out
+
     def filter_offsets(self, text: str):
         """过滤 Offset 列表"""
         text = text.lower().strip()
@@ -383,7 +428,7 @@ class ConsumerGroupPanel(QWidget):
         else:
             filtered = [o for o in self.all_offsets if text in o.topic.lower()]
         self.display_offsets(filtered)
-    
+
     def display_offsets(self, offsets):
         """显示 Offset 列表"""
         self.offsets_table.setSortingEnabled(False)
