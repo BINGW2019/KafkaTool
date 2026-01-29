@@ -759,27 +759,43 @@ class MessageDetailDialog(QDialog):
         
         # 元数据
         meta_group = QGroupBox("元数据")
-        meta_layout = QFormLayout(meta_group)
-        meta_layout.setSpacing(8)
+        self.meta_layout = QFormLayout(meta_group)
+        self.meta_layout.setSpacing(8)
         
         self.topic_label = QLabel()
         self.topic_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        meta_layout.addRow("Topic:", self.topic_label)
+        self.meta_layout.addRow("Topic:", self.topic_label)
         
         self.partition_label = QLabel()
-        meta_layout.addRow("分区:", self.partition_label)
+        self.meta_layout.addRow("分区:", self.partition_label)
         
         self.offset_label = QLabel()
-        meta_layout.addRow("Offset:", self.offset_label)
+        self.meta_layout.addRow("Offset:", self.offset_label)
         
         self.timestamp_label = QLabel()
-        meta_layout.addRow("时间戳:", self.timestamp_label)
+        self.meta_layout.addRow("时间戳:", self.timestamp_label)
         
-        # 消费状态（合并到元数据）
+        # 消费状态（始终显示）；消费者、消费时间（仅已消费时动态显示）
         self.consumption_status_label = QLabel("检查中...")
         self.consumption_status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.consumption_status_label.setWordWrap(True)
-        meta_layout.addRow("消费状态:", self.consumption_status_label)
+        self.meta_layout.addRow("消费状态:", self.consumption_status_label)
+        
+        self.consumer_label = QLabel()
+        self.consumer_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.consumer_label.setWordWrap(True)
+        self.meta_layout.addRow("消费者:", self.consumer_label)
+        self.consumer_row_label = self.meta_layout.labelForField(self.consumer_label)
+        self.consumer_label.setVisible(False)
+        self.consumer_row_label.setVisible(False)
+        
+        self.consumption_time_label = QLabel()
+        self.consumption_time_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.consumption_time_label.setWordWrap(True)
+        self.meta_layout.addRow("消费时间:", self.consumption_time_label)
+        self.consumption_time_row_label = self.meta_layout.labelForField(self.consumption_time_label)
+        self.consumption_time_label.setVisible(False)
+        self.consumption_time_row_label.setVisible(False)
         
         layout.addWidget(meta_group)
         
@@ -879,25 +895,32 @@ class MessageDetailDialog(QDialog):
             )
     
     def update_consumption_status(self, consumed_by):
-        """更新消费状态显示（已合并到元数据）"""
+        """动态显示：仅已消费时显示消费者、消费时间两行；已消费状态用绿色、未消费用红色"""
         if not consumed_by:
             self.consumption_status_label.setText("未消费")
             self.consumption_status_label.setStyleSheet("color: #f44336;")  # 红色
+            self.consumer_label.setVisible(False)
+            self.consumer_row_label.setVisible(False)
+            self.consumption_time_label.setVisible(False)
+            self.consumption_time_row_label.setVisible(False)
         else:
-            # 已消费：显示消费者和消费时间
-            lines = []
-            for group in consumed_by:
-                consumption_time = group.get('consumption_time')
-                if consumption_time:
-                    if isinstance(consumption_time, datetime):
-                        time_str = consumption_time.strftime('%Y-%m-%d %H:%M:%S')
-                    else:
-                        time_str = str(consumption_time)
-                else:
-                    time_str = "-"
-                lines.append(f"{group['group_id']} · {time_str}")
-            self.consumption_status_label.setText("\n".join(lines))
+            self.consumption_status_label.setText("已消费")
             self.consumption_status_label.setStyleSheet("color: #4caf50;")  # 绿色
+            self.consumer_label.setText("\n".join(g.get("group_id", "-") for g in consumed_by))
+            self.consumer_label.setStyleSheet("color: #4caf50;")
+            time_strs = []
+            for g in consumed_by:
+                t = g.get("consumption_time")
+                if t:
+                    time_strs.append(t.strftime("%Y-%m-%d %H:%M:%S") if isinstance(t, datetime) else str(t))
+                else:
+                    time_strs.append("-")
+            self.consumption_time_label.setText("\n".join(time_strs))
+            self.consumption_time_label.setStyleSheet("color: #4caf50;")
+            self.consumer_label.setVisible(True)
+            self.consumer_row_label.setVisible(True)
+            self.consumption_time_label.setVisible(True)
+            self.consumption_time_row_label.setVisible(True)
     
     def copy_value(self):
         """复制 Value 到剪贴板"""

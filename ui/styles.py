@@ -134,6 +134,7 @@ QTreeWidget, QTreeView {
     padding: 4px;
     outline: none;
     selection-background-color: transparent;
+    font-family: 'Segoe UI', 'Segoe UI Emoji', 'Microsoft YaHei UI', sans-serif;
 }
 
 QTreeWidget::item, QTreeView::item {
@@ -921,6 +922,7 @@ QTreeWidget, QTreeView {
     border-radius: 0px;
     padding: 4px;
     outline: none;
+    font-family: 'Segoe UI', 'Segoe UI Emoji', 'Microsoft YaHei UI', sans-serif;
 }
 
 QTreeWidget::item, QTreeView::item {
